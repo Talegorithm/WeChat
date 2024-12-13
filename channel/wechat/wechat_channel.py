@@ -168,6 +168,8 @@ class WechatChannel(ChatChannel):
     @time_checker
     @_check
     def handle_single(self, cmsg: ChatMessage):
+        logger.debug("[WX] handle_single called with msg: {}".format(cmsg))
+        
         # filter system message
         if cmsg.other_user_id in ["weixin"]:
             return
@@ -185,6 +187,7 @@ class WechatChannel(ChatChannel):
             logger.debug("[WX]receive msg: {}, cmsg={}".format(cmsg.content, cmsg))
         context = self._compose_context(cmsg.ctype, cmsg.content, isgroup=False, msg=cmsg)
         if context:
+            logger.debug("[WX] Producing context in handle_single")
             self.produce(context)
 
     @time_checker

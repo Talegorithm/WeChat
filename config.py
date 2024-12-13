@@ -11,6 +11,11 @@ from common.log import logger
 # 将所有可用的配置项写在字典里, 请使用小写字母
 # 此处的配置值无实际意义，程序不会读取此处的配置，仅用于提示格式，请将配置加入到config.json中
 available_setting = {
+    "mq_host": "rabbitmq",
+    "mq_request_queue": "wechat_request",
+    "mq_response_queue": "wechat_response",
+    "mq_retry_times": 3,
+    "mq_retry_interval": 3,      
     # openai api配置
     "open_ai_api_key": "",  # openai api key
     # openai apibase，当use_azure_chatgpt为true时，需要设置对应的api base

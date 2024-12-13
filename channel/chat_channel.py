@@ -10,6 +10,8 @@ from bridge.reply import *
 from channel.channel import Channel
 from common.dequeue import Dequeue
 from common import memory
+from common.mq_client import MQClient
+from common.mq_listener import MQListener
 from plugins import *
 
 try:
@@ -29,12 +31,33 @@ class ChatChannel(Channel):
     lock = threading.Lock()  # 用于控制对sessions的访问
 
     def __init__(self):
-        _thread = threading.Thread(target=self.consume)
-        _thread.setDaemon(True)
-        _thread.start()
+        logger.debug("[chat_channel] Initializing ChatChannel")
+        try:
+            super().__init__()
+            self.mq_client = MQClient()
+            if not self.mq_client.channel:
+                raise Exception("Failed to establish MQ connection")
+            
+            # 检查队列状态
+            self.mq_client.check_queue_status()
+            
+            self.session_id_to_context = {}
+            self.listener = MQListener(self)
+            logger.info("[MQ] Initializing message queue listener...")
+            self.listener.start()
+            
+            # 启动消费者线程
+            _thread = threading.Thread(target=self.consume)
+            _thread.setDaemon(True)
+            _thread.start()
+            
+        except Exception as e:
+            logger.error(f"[chat_channel] Error in initialization: {e}")
+            raise
 
     # 根据消息构造context，消息内容相关的触发项写在这里
     def _compose_context(self, ctype: ContextType, content, **kwargs):
+        logger.debug(f"[chat_channel] Composing context: type={ctype}, content={content}, kwargs={kwargs}")
         context = Context(ctype, content)
         context.kwargs = kwargs
         # context首次传入时，origin_ctype是None,
@@ -146,6 +169,7 @@ class ChatChannel(Channel):
                 elif context["origin_ctype"] == ContextType.VOICE:  # 如果源消息是私聊的语音消息，允许不匹配前缀，放宽条件
                     pass
                 else:
+                    logger.debug("[chat_channel] No prefix match, message ignored")
                     return None
             content = content.strip()
             img_match_prefix = check_prefix(content, conf().get("image_create_prefix",[""]))
@@ -163,74 +187,50 @@ class ChatChannel(Channel):
         return context
 
     def _handle(self, context: Context):
+        """
+        处理消息的主要方法；produce继承自ChatChannel，所以这里需要重写
+        原流程: 接收消息 -> 生成回复 -> 装饰回复 -> 发送回复
+        新流程: 接收消息 -> 发送到请求队列 -> (异步)等待响应队列 -> 收到回复后发送
+        """
         if context is None or not context.content:
             return
-        logger.debug("[chat_channel] ready to handle context: {}".format(context))
-        # reply的构建步骤
-        reply = self._generate_reply(context)
+        
+        session_id = context["session_id"]
+        logger.debug("[MQ] Entering _handle with session_id={}, content={}".format(
+            session_id, context.content))
 
-        logger.debug("[chat_channel] ready to decorate reply: {}".format(reply))
+        # 保存context,用于后续发送响应时使用
+        self.session_id_to_context[session_id] = context
+        
+        # 构造要发送到队列的消息
+        message = {
+            "session_id": session_id,
+            "content": context.content,
+            "type": context.type.name,
+            # 可以添加更多需要的字段
+            "isgroup": context.kwargs.get("isgroup", False),
+            "msg": {
+                "from_user_id": context.kwargs.get("msg").from_user_id if context.kwargs.get("msg") else None,
+                "from_user_nickname": context.kwargs.get("msg").from_user_nickname if context.kwargs.get("msg") else None,
+            }
+        }
+        
+        # 发送到请求队列
+        logger.debug(f"[MQ] Message structure before sending: {message}")
+        send_result = self.mq_client.send_to_request_queue(message)
+        logger.debug(f"[MQ] Send result: {send_result}")
+        
+        if not send_result:
+            # 发送失败的处理
+            error_reply = Reply(ReplyType.ERROR, "抱歉，消息处理出现错误，请重试")
+            self._send_reply(context, error_reply)
+            self._fail_callback(session_id, "Failed to send message to queue", context)
+            return
+        
+        logger.info(f"[MQ] Message sent to request queue, session_id: {session_id}")
 
-        # reply的包装步骤
-        if reply and reply.content:
-            reply = self._decorate_reply(context, reply)
-
-            # reply的发送步骤
-            self._send_reply(context, reply)
-
-    def _generate_reply(self, context: Context, reply: Reply = Reply()) -> Reply:
-        e_context = PluginManager().emit_event(
-            EventContext(
-                Event.ON_HANDLE_CONTEXT,
-                {"channel": self, "context": context, "reply": reply},
-            )
-        )
-        reply = e_context["reply"]
-        if not e_context.is_pass():
-            logger.debug("[chat_channel] ready to handle context: type={}, content={}".format(context.type, context.content))
-            if context.type == ContextType.TEXT or context.type == ContextType.IMAGE_CREATE:  # 文字和图片消息
-                context["channel"] = e_context["channel"]
-                reply = super().build_reply_content(context.content, context)
-            elif context.type == ContextType.VOICE:  # 语音消息
-                cmsg = context["msg"]
-                cmsg.prepare()
-                file_path = context.content
-                wav_path = os.path.splitext(file_path)[0] + ".wav"
-                try:
-                    any_to_wav(file_path, wav_path)
-                except Exception as e:  # 转换失败，直接使用mp3，对于某些api，mp3也可以识别
-                    logger.warning("[chat_channel]any to wav error, use raw path. " + str(e))
-                    wav_path = file_path
-                # 语音识别
-                reply = super().build_voice_to_text(wav_path)
-                # 删除临时文件
-                try:
-                    os.remove(file_path)
-                    if wav_path != file_path:
-                        os.remove(wav_path)
-                except Exception as e:
-                    pass
-                    # logger.warning("[chat_channel]delete temp file error: " + str(e))
-
-                if reply.type == ReplyType.TEXT:
-                    new_context = self._compose_context(ContextType.TEXT, reply.content, **context.kwargs)
-                    if new_context:
-                        reply = self._generate_reply(new_context)
-                    else:
-                        return
-            elif context.type == ContextType.IMAGE:  # 图片消息，当前仅做下载保存到本地的逻辑
-                memory.USER_IMAGE_CACHE[context["session_id"]] = {
-                    "path": context.content,
-                    "msg": context.get("msg")
-                }
-            elif context.type == ContextType.SHARING:  # 分享信息，当前无默认逻辑
-                pass
-            elif context.type == ContextType.FUNCTION or context.type == ContextType.FILE:  # 文件消息及函数调用等，当前无默认逻辑
-                pass
-            else:
-                logger.warning("[chat_channel] unknown context type: {}".format(context.type))
-                return
-        return reply
+        # 注意:这里不再等待回复
+        # 回复将由 MQListener 异步处理
 
     def _decorate_reply(self, context: Context, reply: Reply) -> Reply:
         if reply and reply.type:
@@ -303,60 +303,69 @@ class ChatChannel(Channel):
         logger.exception("Worker return exception: {}".format(exception))
 
     def _thread_pool_callback(self, session_id, **kwargs):
-        def func(worker: Future):
+        def callback(future):
             try:
-                worker_exception = worker.exception()
-                if worker_exception:
-                    self._fail_callback(session_id, exception=worker_exception, **kwargs)
-                else:
+                e = future.exception()
+                if e is None:
                     self._success_callback(session_id, **kwargs)
-            except CancelledError as e:
-                logger.info("Worker cancelled, session_id = {}".format(session_id))
+                else:
+                    self._fail_callback(session_id, e, **kwargs)
             except Exception as e:
-                logger.exception("Worker raise exception: {}".format(e))
-            with self.lock:
-                self.sessions[session_id][1].release()
-
-        return func
+                logger.error("[chat_channel] {} exception: {}".format(session_id, e))
+            finally:
+                with self.lock:
+                    if session_id in self.sessions:
+                        context_queue, semaphore = self.sessions[session_id]
+                        semaphore.release()
+        return callback
 
     def produce(self, context: Context):
+        """
+        处理接收到的消息
+        """
         session_id = context["session_id"]
+        logger.debug(f"[chat_channel] produce: session_id={session_id}")
+        
         with self.lock:
             if session_id not in self.sessions:
+                logger.debug(f"[chat_channel] Creating new session for {session_id}")
                 self.sessions[session_id] = [
                     Dequeue(),
                     threading.BoundedSemaphore(conf().get("concurrency_in_session", 4)),
                 ]
+            logger.debug(f"[chat_channel] Adding context to session queue: {session_id}")
+            # 根据消息类型决定添加位置
             if context.type == ContextType.TEXT and context.content.startswith("#"):
                 self.sessions[session_id][0].putleft(context)  # 优先处理管理命令
+                logger.debug(f"[chat_channel] Added admin command to front of queue: {session_id}")
             else:
-                self.sessions[session_id][0].put(context)
+                self.sessions[session_id][0].put(context)  # 普通消息添加到队尾
+                logger.debug(f"[chat_channel] Added normal message to queue: {session_id}")
 
     # 消费者函数，单独线程，用于从消息队列中取出消息并处理
     def consume(self):
+        """消费者函数，处理会话队列中的消息"""
+        logger.debug("[chat_channel] Starting consume loop")
         while True:
             with self.lock:
                 session_ids = list(self.sessions.keys())
+            if session_ids:
+                logger.debug(f"[chat_channel] Found sessions: {session_ids}")
             for session_id in session_ids:
                 with self.lock:
                     context_queue, semaphore = self.sessions[session_id]
-                if semaphore.acquire(blocking=False):  # 等线程处理完毕才能删除
-                    if not context_queue.empty():
-                        context = context_queue.get()
-                        logger.debug("[chat_channel] consume context: {}".format(context))
-                        future: Future = handler_pool.submit(self._handle, context)
-                        future.add_done_callback(self._thread_pool_callback(session_id, context=context))
-                        with self.lock:
-                            if session_id not in self.futures:
-                                self.futures[session_id] = []
-                            self.futures[session_id].append(future)
-                    elif semaphore._initial_value == semaphore._value + 1:  # 除了当前，没有任务再申请到信号量，说明所有任务都处理完毕
-                        with self.lock:
-                            self.futures[session_id] = [t for t in self.futures[session_id] if not t.done()]
-                            assert len(self.futures[session_id]) == 0, "thread pool error"
-                            del self.sessions[session_id]
-                    else:
-                        semaphore.release()
+                if semaphore.acquire(blocking=False):
+                    try:
+                        if not context_queue.empty():
+                            context = context_queue.get()
+                            logger.debug("[chat_channel] Processing context from queue: {}".format(context))
+                            self._handle(context)
+                        elif semaphore._initial_value == semaphore._value + 1:
+                            with self.lock:
+                                logger.debug(f"[chat_channel] Removing empty session: {session_id}")
+                                del self.sessions[session_id]
+                    finally:
+                        semaphore.release()  # 确保信号量被释放
             time.sleep(0.2)
 
     # 取消session_id对应的所有任务，只能取消排队的消息和已提交线程池但未执行的任务

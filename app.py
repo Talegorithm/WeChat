@@ -10,6 +10,7 @@ from common import const
 from config import load_config
 from plugins import *
 import threading
+import logging
 
 
 def sigterm_handler_wrap(_signo):
@@ -68,4 +69,5 @@ def run():
 
 
 if __name__ == "__main__":
+    logger.setLevel(logging.DEBUG)
     run()
