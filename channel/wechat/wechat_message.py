@@ -79,8 +79,14 @@ class WechatMessage(ChatMessage):
             self.content = TmpDir().path() + itchat_msg["FileName"]  # content直接存临时目录路径
             self._prepare_fn = lambda: itchat_msg.download(self.content)
         elif itchat_msg["Type"] == SHARING:
-            self.ctype = ContextType.SHARING
-            self.content = itchat_msg.get("Url")
+            if itchat_msg.get("Url"):  # 如果包含 URL
+                self.ctype = ContextType.URL
+                self.content = itchat_msg.get("Url")
+                logger.debug(f"[WX] URL: {self.content}")
+            else:
+                self.ctype = ContextType.SHARING
+                self.content = itchat_msg.get("Url")
+                logger.debug(f"[WX] SHARING: {self.content}") 
 
         else:
             raise NotImplementedError("Unsupported message type: Type:{} MsgType:{}".format(itchat_msg["Type"], itchat_msg["MsgType"]))

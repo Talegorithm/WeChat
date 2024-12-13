@@ -184,6 +184,12 @@ class ChatChannel(Channel):
         elif context.type == ContextType.VOICE:
             if "desire_rtype" not in context and conf().get("voice_reply_voice") and ReplyType.VOICE not in self.NOT_SUPPORT_REPLYTYPE:
                 context["desire_rtype"] = ReplyType.VOICE
+        elif ctype == ContextType.URL:
+            # URL类型不需要前缀匹配
+            if "desire_rtype" not in context:
+                context["desire_rtype"] = ReplyType.TEXT
+            # 保持原始URL内容
+            context.content = content.strip()
         return context
 
     def _handle(self, context: Context):
