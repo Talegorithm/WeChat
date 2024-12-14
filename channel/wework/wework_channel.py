@@ -17,6 +17,8 @@ from common.singleton import singleton
 from common.log import logger
 from common.time_check import time_checker
 from common.utils import compress_imgfile, fsize
+from channel.wework.mq_client import MQClient
+from channel.wework.mq_listener import MQListener
 from config import conf
 from channel.wework.run import wework
 from channel.wework import run
@@ -130,12 +132,14 @@ def all_msg_handler(wework_instance: ntwork.WeWork, message):
             is_group = "R:" in conversation_id
             try:
                 cmsg = create_message(wework_instance=wework_instance, message=message, is_group=is_group)
+                if cmsg.msg_type == ContextType.URL:  # 处理URL类型消息
+                    cmsg.content = message['data'].get('url', '')
             except NotImplementedError as e:
                 logger.error(f"[WX]{message.get('MsgId', 'unknown')} 跳过: {e}")
                 return None
-            delay = random.randint(1, 2)
-            timer = threading.Timer(delay, handle_message, args=(cmsg, is_group))
-            timer.start()
+                
+            # 直接处理消息,不再使用延迟
+            handle_message(cmsg, is_group)
         else:
             logger.debug("消息数据中无 conversation_id")
             return None
@@ -178,6 +182,11 @@ class WeworkChannel(ChatChannel):
 
     def __init__(self):
         super().__init__()
+        self.mq_client = MQClient()
+        self.session_id_to_context = {}
+        self.listener = MQListener(self)
+        # 启动响应监听
+        self.listener.start()
 
     def startup(self):
         smart = conf().get("wework_smart", True)
@@ -324,3 +333,16 @@ class WeworkChannel(ChatChannel):
             reply.content = os.path.join(current_dir, "tmp", voice_file)
             wework.send_file(receiver, reply.content)
             logger.info("[WX] sendFile={}, receiver={}".format(reply.content, receiver))
+
+    def _compose_context(self, ctype: ContextType, content, **kwargs):
+        context = super()._compose_context(ctype, content, **kwargs)
+        if context is None:
+            return None
+        
+        if ctype == ContextType.URL:
+            # URL类型消息的特殊处理
+            if "desire_rtype" not in context:
+                context["desire_rtype"] = ReplyType.TEXT
+            context.content = content.strip()
+        
+        return context

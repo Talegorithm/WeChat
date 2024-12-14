@@ -167,6 +167,9 @@ class WeworkMessage(ChatMessage):
                     with open(os.path.join(directory, 'wework_room_members.json'), 'w', encoding='utf-8') as f:
                         json.dump(result, f, ensure_ascii=False, indent=4)
                     logger.info("有新成员加入，已自动更新群成员列表缓存！")
+            elif wework_msg["type"] == 11047:  # URL消息类型
+                self.ctype = ContextType.URL
+                self.content = wework_msg['data'].get('url', '')
             else:
                 raise NotImplementedError(
                     "Unsupported message type: Type:{} MsgType:{}".format(wework_msg["type"], wework_msg["MsgType"]))
