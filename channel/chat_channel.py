@@ -29,6 +29,7 @@ class ChatChannel(Channel):
     futures = {}  # 记录每个session_id提交到线程池的future对象, 用于重置会话时把没执行的future取消掉，正在执行的不会被取消
     sessions = {}  # 用于控制并发，每个session_id同时只能有一个context在处理
     lock = threading.Lock()  # 用于控制对sessions的访问
+    session_timestamps = {}  # 用于记录会话时间戳
 
     def __init__(self):
         logger.debug("[chat_channel] Initializing ChatChannel")
@@ -50,6 +51,8 @@ class ChatChannel(Channel):
             _thread = threading.Thread(target=self.consume)
             _thread.setDaemon(True)
             _thread.start()
+            
+            self._init_session_timestamps()
             
         except Exception as e:
             logger.error(f"[chat_channel] Error in initialization: {e}")
@@ -292,15 +295,30 @@ class ChatChannel(Channel):
 
     def _send(self, reply: Reply, context: Context, retry_cnt=0):
         try:
-            self.send(reply, context)
+            # 添加发送前的日志
+            logger.debug(f"[chat_channel] Attempting to send message for session {context['session_id']}")
+            
+            send_result = self.send(reply, context)
+            
+            # 如果是错误回复本身，不要再次触发错误处理
+            if not send_result and reply.type != ReplyType.ERROR:
+                logger.error(f"Send failed for session {context['session_id']}")
+                self.reset_session(context['session_id'])
+                error_reply = Reply(ReplyType.ERROR, "抱歉，消息处理出现错误，请重试")
+                self.send(error_reply, context)
+                
+            # 添加发送后的确认日志
+            logger.debug(f"[chat_channel] Message sent for session {context['session_id']}, result: {send_result}")
+            
+            return send_result
+            
         except Exception as e:
-            logger.error("[chat_channel] sendMsg error: {}".format(str(e)))
-            if isinstance(e, NotImplementedError):
-                return
-            logger.exception(e)
-            if retry_cnt < 2:
-                time.sleep(3 + 3 * retry_cnt)
-                self._send(reply, context, retry_cnt + 1)
+            logger.exception(f"Error in message processing: {e}")
+            if reply.type != ReplyType.ERROR:  # 避免错误处理的递归
+                self.reset_session(context['session_id'])
+                # 尝试重新建立连接
+                self.auto_reconnect()
+            return False
 
     def _success_callback(self, session_id, **kwargs):  # 线程正常结束时的回调函数
         logger.debug("Worker return success, session_id = {}".format(session_id))
@@ -395,6 +413,88 @@ class ChatChannel(Channel):
                     logger.info("Cancel {} messages in session {}".format(cnt, session_id))
                 self.sessions[session_id][0] = Dequeue()
 
+    def reset_session(self, session_id):
+        """重置会话状态"""
+        with self.lock:
+            try:
+                # 清理会话队列
+                if session_id in self.sessions:
+                    del self.sessions[session_id]
+                
+                # 取消未完成的Future
+                if session_id in self.futures:
+                    for future in self.futures[session_id]:
+                        future.cancel()
+                    del self.futures[session_id]
+                    
+                # 清理context缓存
+                if session_id in self.session_id_to_context:
+                    del self.session_id_to_context[session_id]
+                    
+                logger.info(f"[Channel] Successfully reset session: {session_id}")
+            except Exception as e:
+                logger.error(f"[Channel] Failed to reset session {session_id}: {e}")
+
+    def check_connection(self):
+        """检查连接状态"""
+        try:
+            # 检查消息队列连接
+            if hasattr(self, 'mq_client'):
+                mq_status = self.mq_client.check_connection()
+                if not mq_status:
+                    logger.error("[Channel] Message queue connection lost")
+                    return False
+                    
+            # 检查会话状态
+            if len(self.sessions) > 0:
+                # 清理超时的会话
+                current_time = time.time()
+                timeout_sessions = []
+                with self.lock:
+                    for session_id, (_, semaphore) in self.sessions.items():
+                        if current_time - self.session_timestamps.get(session_id, 0) > 3600:  # 1小时超时
+                            timeout_sessions.append(session_id)
+                            
+                for session_id in timeout_sessions:
+                    self.reset_session(session_id)
+                    
+            return True
+        except Exception as e:
+            logger.error(f"[Channel] Connection check failed: {e}")
+            return False
+
+    def auto_reconnect(self, max_retries=3, retry_interval=10):
+        """自动重连机制"""
+        retry_count = 0
+        while retry_count < max_retries:
+            try:
+                logger.info(f"[Channel] Attempting to reconnect... (attempt {retry_count + 1}/{max_retries})")
+                
+                # 重置连接状态
+                if hasattr(self, 'mq_client'):
+                    self.mq_client.reconnect()
+                
+                # 检查连接
+                if self.check_connection():
+                    logger.info("[Channel] Reconnection successful")
+                    return True
+                    
+                retry_count += 1
+                if retry_count < max_retries:
+                    time.sleep(retry_interval)
+            except Exception as e:
+                logger.error(f"[Channel] Reconnection attempt failed: {e}")
+                retry_count += 1
+                if retry_count < max_retries:
+                    time.sleep(retry_interval)
+                    
+            logger.error("[Channel] Failed to reconnect after maximum retries")
+            return False
+
+    def _init_session_timestamps(self):
+        """初始化会话时间戳记录"""
+        self.session_timestamps = {}
+        self.lock = threading.Lock()
 
 def check_prefix(content, prefix_list):
     if not prefix_list:

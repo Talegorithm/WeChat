@@ -214,63 +214,70 @@ class WechatChannel(ChatChannel):
 
     # 统一的发送函数，每个Channel自行实现，根据reply的type字段发送不同类型的消息
     def send(self, reply: Reply, context: Context):
-        receiver = context["receiver"]
-        if reply.type == ReplyType.TEXT:
-            reply.content = remove_markdown_symbol(reply.content)
-            itchat.send(reply.content, toUserName=receiver)
-            logger.info("[WX] sendMsg={}, receiver={}".format(reply, receiver))
-        elif reply.type == ReplyType.ERROR or reply.type == ReplyType.INFO:
-            reply.content = remove_markdown_symbol(reply.content)
-            itchat.send(reply.content, toUserName=receiver)
-            logger.info("[WX] sendMsg={}, receiver={}".format(reply, receiver))
-        elif reply.type == ReplyType.VOICE:
-            itchat.send_file(reply.content, toUserName=receiver)
-            logger.info("[WX] sendFile={}, receiver={}".format(reply.content, receiver))
-        elif reply.type == ReplyType.IMAGE_URL:  # 从网络下载图片
-            img_url = reply.content
-            logger.debug(f"[WX] start download image, img_url={img_url}")
-            pic_res = requests.get(img_url, stream=True)
-            image_storage = io.BytesIO()
-            size = 0
-            for block in pic_res.iter_content(1024):
-                size += len(block)
-                image_storage.write(block)
-            logger.info(f"[WX] download image success, size={size}, img_url={img_url}")
-            image_storage.seek(0)
-            if ".webp" in img_url:
-                try:
-                    image_storage = convert_webp_to_png(image_storage)
-                except Exception as e:
-                    logger.error(f"Failed to convert image: {e}")
-                    return
-            itchat.send_image(image_storage, toUserName=receiver)
-            logger.info("[WX] sendImage url={}, receiver={}".format(img_url, receiver))
-        elif reply.type == ReplyType.IMAGE:  # 从文件读取图片
-            image_storage = reply.content
-            image_storage.seek(0)
-            itchat.send_image(image_storage, toUserName=receiver)
-            logger.info("[WX] sendImage, receiver={}".format(receiver))
-        elif reply.type == ReplyType.FILE:  # 新增文件回复类型
-            file_storage = reply.content
-            itchat.send_file(file_storage, toUserName=receiver)
-            logger.info("[WX] sendFile, receiver={}".format(receiver))
-        elif reply.type == ReplyType.VIDEO:  # 新增视频回复类型
-            video_storage = reply.content
-            itchat.send_video(video_storage, toUserName=receiver)
-            logger.info("[WX] sendFile, receiver={}".format(receiver))
-        elif reply.type == ReplyType.VIDEO_URL:  # 新增视频URL回复类型
-            video_url = reply.content
-            logger.debug(f"[WX] start download video, video_url={video_url}")
-            video_res = requests.get(video_url, stream=True)
-            video_storage = io.BytesIO()
-            size = 0
-            for block in video_res.iter_content(1024):
-                size += len(block)
-                video_storage.write(block)
-            logger.info(f"[WX] download video success, size={size}, video_url={video_url}")
-            video_storage.seek(0)
-            itchat.send_video(video_storage, toUserName=receiver)
-            logger.info("[WX] sendVideo url={}, receiver={}".format(video_url, receiver))
+        try:
+            receiver = context["receiver"]
+            if reply.type == ReplyType.TEXT:
+                reply.content = remove_markdown_symbol(reply.content)
+                itchat.send(reply.content, toUserName=receiver)
+                logger.info("[WX] sendMsg={}, receiver={}".format(reply, receiver))
+                return True
+            elif reply.type == ReplyType.ERROR or reply.type == ReplyType.INFO:
+                reply.content = remove_markdown_symbol(reply.content)
+                itchat.send(reply.content, toUserName=receiver)
+                logger.info("[WX] sendMsg={}, receiver={}".format(reply, receiver))
+                return True
+            elif reply.type == ReplyType.VOICE:
+                itchat.send_file(reply.content, toUserName=receiver)
+                logger.info("[WX] sendFile={}, receiver={}".format(reply.content, receiver))
+            elif reply.type == ReplyType.IMAGE_URL:  # 从网络下载图片
+                img_url = reply.content
+                logger.debug(f"[WX] start download image, img_url={img_url}")
+                pic_res = requests.get(img_url, stream=True)
+                image_storage = io.BytesIO()
+                size = 0
+                for block in pic_res.iter_content(1024):
+                    size += len(block)
+                    image_storage.write(block)
+                logger.info(f"[WX] download image success, size={size}, img_url={img_url}")
+                image_storage.seek(0)
+                if ".webp" in img_url:
+                    try:
+                        image_storage = convert_webp_to_png(image_storage)
+                    except Exception as e:
+                        logger.error(f"Failed to convert image: {e}")
+                        return False
+                itchat.send_image(image_storage, toUserName=receiver)
+                logger.info("[WX] sendImage url={}, receiver={}".format(img_url, receiver))
+            elif reply.type == ReplyType.IMAGE:  # 从文件读取图片
+                image_storage = reply.content
+                image_storage.seek(0)
+                itchat.send_image(image_storage, toUserName=receiver)
+                logger.info("[WX] sendImage, receiver={}".format(receiver))
+            elif reply.type == ReplyType.FILE:  # 新增文件回复类型
+                file_storage = reply.content
+                itchat.send_file(file_storage, toUserName=receiver)
+                logger.info("[WX] sendFile, receiver={}".format(receiver))
+            elif reply.type == ReplyType.VIDEO:  # 新增视频回复类型
+                video_storage = reply.content
+                itchat.send_video(video_storage, toUserName=receiver)
+                logger.info("[WX] sendFile, receiver={}".format(receiver))
+            elif reply.type == ReplyType.VIDEO_URL:  # 新增视频URL回复类型
+                video_url = reply.content
+                logger.debug(f"[WX] start download video, video_url={video_url}")
+                video_res = requests.get(video_url, stream=True)
+                video_storage = io.BytesIO()
+                size = 0
+                for block in video_res.iter_content(1024):
+                    size += len(block)
+                    video_storage.write(block)
+                logger.info(f"[WX] download video success, size={size}, video_url={video_url}")
+                video_storage.seek(0)
+                itchat.send_video(video_storage, toUserName=receiver)
+                logger.info("[WX] sendVideo url={}, receiver={}".format(video_url, receiver))
+            return True  # 如果成功处理了所有情况
+        except Exception as e:
+            logger.error(f"[WX] Failed to send message: {e}")
+            return False
 
 def _send_login_success():
     try:
